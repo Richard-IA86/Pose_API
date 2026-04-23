@@ -57,7 +57,9 @@ async def trigger_pipeline(request: ETLTriggerRequest, triggered_by: str) -> ETL
         "async_run": request.async_run,
         "triggered_by": triggered_by,
     }
-    headers = {"X-API-Key": settings.etl_api_key, "Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json"}
+    if settings.etl_api_key:
+        headers["X-API-Key"] = settings.etl_api_key
 
     try:
         async with httpx.AsyncClient(timeout=10) as client:

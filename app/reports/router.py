@@ -1,8 +1,8 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
-from app.auth.router import get_current_superuser, get_current_user
+from app.auth.router import get_current_user
 from app.database import get_db
 from app.reports.excel import build_sessions_report
 
@@ -18,11 +18,15 @@ def download_sessions_excel(
     """
     Generate and download an Excel report (.xlsx) of POSE sessions.
 
-    - Regular users can only download their own sessions.
+    - Regular users can only download their own sessions. Providing `user_id` is not allowed.
     - Superusers may pass `user_id` to filter for a specific user, or omit it to get all sessions.
     """
-    # Enforce per-user scope for non-superusers
     if not current_user.is_superuser:
+        if user_id is not None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only superusers can filter reports by user_id",
+            )
         target_user_id = current_user.id
     else:
         target_user_id = user_id  # None => all users

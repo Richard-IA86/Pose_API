@@ -20,10 +20,9 @@ class TestReportsEndpoint:
         assert resp.status_code == 403
 
     def test_regular_user_cannot_filter_other_user(self, client: TestClient, auth_headers):
-        # Regular user requesting user_id=999 should silently be scoped to own ID
+        # Regular user providing user_id should receive 403
         resp = client.get("/reports/sessions/excel?user_id=999", headers=auth_headers)
-        # Should still succeed (query is restricted to own data server-side)
-        assert resp.status_code == 200
+        assert resp.status_code == 403
 
     def test_superuser_can_download_all(self, client: TestClient, superuser_headers):
         resp = client.get("/reports/sessions/excel", headers=superuser_headers)
