@@ -1,0 +1,38 @@
+# Entorno virtual
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Pytest / mypy / coverage
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Variables de entorno
+.env
+.env.*
+!.env.example
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Temporales
+_temp_*
