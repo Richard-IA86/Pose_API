@@ -1,6 +1,8 @@
 import logging
+import io
+from datetime import date
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 import pandas as pd
@@ -150,3 +152,43 @@ def get_dashboard_data(db: Session = Depends(get_db)):
         "default_groups": [],
         "all_display_groups": {},
     }
+
+
+@router.get("/exportar-excel")
+def exportar_excel(db: Session = Depends(get_db)) -> Response:
+    """Exporta fact_costos_b52 completa como archivo Excel."""
+    query = text("""
+        SELECT
+            "OBRA_PRONTO",
+            "DESCRIPCION_OBRA",
+            "FECHA",
+            "FUENTE",
+            "TIPO_COMPROBANTE",
+            "NRO_COMPROBANTE",
+            "PROVEEDOR",
+            "DETALLE",
+            "CODIGO_CUENTA",
+            "IMPORTE",
+            "OBSERVACION",
+            "RUBRO_CONTABLE",
+            "CUENTA_CONTABLE",
+            "COMPENSABLE",
+            "GERENCIA",
+            "TC",
+            "IMPORTE_USD"
+        FROM fact_costos_b52
+        ORDER BY "FECHA", "OBRA_PRONTO"
+    """)
+    df = pd.read_sql(query, db.connection())
+    output = io.BytesIO()
+    df.to_excel(output, index=False, engine="openpyxl")
+    output.seek(0)
+    filename = f"b52_{date.today().isoformat()}.xlsx"
+    return Response(
+        content=output.getvalue(),
+        media_type=(
+            "application/vnd.openxmlformats-officedocument"
+            ".spreadsheetml.sheet"
+        ),
+        headers={"Content-Disposition": (f"attachment; filename={filename}")},
+    )
