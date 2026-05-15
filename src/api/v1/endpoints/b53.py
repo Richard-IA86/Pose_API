@@ -13,8 +13,17 @@ router = APIRouter()
 
 @router.get("/dashboard-data")
 def get_dashboard_data(db: Session = Depends(get_db)):
-    query = 'SELECT substring(CAST("FECHA" AS VARCHAR) from 1 for 7) as mes, "GERENCIA" as gerencia, "IMPORTE" as importe FROM fact_costos_b52 WHERE "FECHA" IS NOT NULL AND "GERENCIA" IS NOT NULL'
-    df = pd.read_sql(text(query), db.connection())
+    query = text("""
+        SELECT
+            substring(CAST(f."FECHA" AS VARCHAR) FROM 1 FOR 7) AS mes,
+            COALESCE(d.gerencia, f."GERENCIA", '')             AS gerencia,
+            f."IMPORTE"                                        AS importe
+        FROM fact_costos_b52 f
+        LEFT JOIN dim_obras_gerencias d
+            ON f."OBRA_PRONTO" = d.obra_pronto
+        WHERE f."FECHA" IS NOT NULL
+    """)
+    df = pd.read_sql(query, db.connection())
 
     meses_unicos = sorted(df["mes"].dropna().unique().tolist())
 
@@ -40,7 +49,9 @@ def get_dashboard_data(db: Session = Depends(get_db)):
             }
         )
 
-    gerencias_list = sorted(df["gerencia"].dropna().unique().tolist())
+    gerencias_list = sorted(
+        [g for g in df["gerencia"].dropna().unique().tolist() if g]
+    )
     gerencias_monthly = {}
     for ger in gerencias_list:
         df_g = df[df["gerencia"] == ger]
@@ -107,7 +118,9 @@ def get_dashboard_data(db: Session = Depends(get_db)):
         for obra_pronto, grupo in df_o.groupby("obra_pronto"):
             res_m = grupo.groupby("mes")["importe"].sum().to_dict()
             obras_monthly[str(obra_pronto)] = {
-                m: {"importe": float(v)} for m, v in res_m.items() if float(v) != 0.0
+                m: {"importe": float(v)}
+                for m, v in res_m.items()
+                if float(v) != 0.0
             }
     except Exception as exc:
         log.warning("obras JOIN no disponible: %s", exc)
