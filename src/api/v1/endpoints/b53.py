@@ -1,16 +1,115 @@
 import logging
-import io
-from datetime import date
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from threading import Lock
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Response
-from sqlalchemy.orm import Session
 from sqlalchemy import text
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse, JSONResponse
 import pandas as pd
-from src.db.session import get_db
+from sqlalchemy.orm import Session
+from src.db.session import engine, get_db
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+_EXPORT_QUERY = """
+    SELECT
+        "OBRA_PRONTO",
+        "DESCRIPCION_OBRA",
+        "FECHA",
+        "FUENTE",
+        "TIPO_COMPROBANTE",
+        "NRO_COMPROBANTE",
+        "PROVEEDOR",
+        "DETALLE",
+        "CODIGO_CUENTA",
+        "IMPORTE",
+        "OBSERVACION",
+        "RUBRO_CONTABLE",
+        "CUENTA_CONTABLE",
+        "COMPENSABLE",
+        "GERENCIA",
+        "TC",
+        "IMPORTE_USD"
+    FROM fact_costos_b52
+    ORDER BY "FECHA", "OBRA_PRONTO"
+"""
+_EXPORT_DIR = Path(tempfile.gettempdir()) / "pose_b52_exports"
+_JOB_TTL_HOURS = 6
+_jobs: dict[str, dict[str, str | int | None]] = {}
+_jobs_lock = Lock()
+_executor = ThreadPoolExecutor(max_workers=1)
+
+
+def _cleanup_old_jobs() -> None:
+    now = datetime.utcnow()
+    expired: list[str] = []
+    with _jobs_lock:
+        for job_id, job in _jobs.items():
+            created_raw = job.get("created_at")
+            if not isinstance(created_raw, str):
+                expired.append(job_id)
+                continue
+            created_at = datetime.fromisoformat(created_raw)
+            if now - created_at > timedelta(hours=_JOB_TTL_HOURS):
+                path_raw = job.get("file_path")
+                if isinstance(path_raw, str):
+                    file_path = Path(path_raw)
+                    if file_path.exists():
+                        file_path.unlink(missing_ok=True)
+                expired.append(job_id)
+        for job_id in expired:
+            _jobs.pop(job_id, None)
+
+
+def _run_excel_export_job(job_id: str) -> None:
+    with _jobs_lock:
+        if job_id not in _jobs:
+            return
+        _jobs[job_id]["status"] = "running"
+
+    try:
+        df = pd.read_sql(text(_EXPORT_QUERY), engine)
+        _EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+        filename = f"b52_{date.today().isoformat()}_{job_id[:8]}.xlsx"
+        file_path = _EXPORT_DIR / filename
+        with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False)
+
+        with _jobs_lock:
+            if job_id in _jobs:
+                _jobs[job_id]["status"] = "done"
+                _jobs[job_id]["file_path"] = str(file_path)
+                _jobs[job_id]["filename"] = filename
+                _jobs[job_id]["rows"] = int(len(df))
+                _jobs[job_id]["error"] = None
+    except Exception as exc:
+        log.exception("Error generando export Excel b52 job=%s", job_id)
+        with _jobs_lock:
+            if job_id in _jobs:
+                _jobs[job_id]["status"] = "error"
+                _jobs[job_id]["error"] = str(exc)
+
+
+def _create_export_job() -> str:
+    _cleanup_old_jobs()
+    job_id = uuid4().hex
+    with _jobs_lock:
+        _jobs[job_id] = {
+            "status": "queued",
+            "created_at": datetime.utcnow().isoformat(),
+            "file_path": None,
+            "filename": None,
+            "rows": None,
+            "error": None,
+        }
+    _executor.submit(_run_excel_export_job, job_id)
+    return job_id
 
 
 @router.get("/dashboard-data")
@@ -154,41 +253,103 @@ def get_dashboard_data(db: Session = Depends(get_db)):
     }
 
 
-@router.get("/exportar-excel")
-def exportar_excel(db: Session = Depends(get_db)) -> Response:
-    """Exporta fact_costos_b52 completa como archivo Excel."""
-    query = text("""
-        SELECT
-            "OBRA_PRONTO",
-            "DESCRIPCION_OBRA",
-            "FECHA",
-            "FUENTE",
-            "TIPO_COMPROBANTE",
-            "NRO_COMPROBANTE",
-            "PROVEEDOR",
-            "DETALLE",
-            "CODIGO_CUENTA",
-            "IMPORTE",
-            "OBSERVACION",
-            "RUBRO_CONTABLE",
-            "CUENTA_CONTABLE",
-            "COMPENSABLE",
-            "GERENCIA",
-            "TC",
-            "IMPORTE_USD"
-        FROM fact_costos_b52
-        ORDER BY "FECHA", "OBRA_PRONTO"
-    """)
-    df = pd.read_sql(query, db.connection())
-    output = io.BytesIO()
-    df.to_excel(output, index=False, engine="openpyxl")
-    output.seek(0)
-    filename = f"b52_{date.today().isoformat()}.xlsx"
-    return Response(
-        content=output.getvalue(),
+@router.post("/exportar-excel/jobs")
+def crear_job_exportar_excel(_: Session = Depends(get_db)) -> JSONResponse:
+    """Crea un job asíncrono para exportar fact_costos_b52 a Excel."""
+    job_id = _create_export_job()
+    return JSONResponse(
+        status_code=202,
+        content={
+            "job_id": job_id,
+            "status": "queued",
+            "status_url": f"/api/v1/b52/exportar-excel/jobs/{job_id}",
+            "download_url": (
+                "/api/v1/b52/exportar-excel/jobs/" f"{job_id}/download"
+            ),
+        },
+    )
+
+
+@router.get("/exportar-excel/jobs/{job_id}")
+def estado_job_exportar_excel(job_id: str) -> dict[str, str | int | None]:
+    """Devuelve estado del job de exportación Excel."""
+    _cleanup_old_jobs()
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Job no encontrado")
+        status = job.get("status")
+        rows = job.get("rows")
+        error = job.get("error")
+
+    payload: dict[str, str | int | None] = {
+        "job_id": job_id,
+        "status": status if isinstance(status, str) else "unknown",
+        "rows": rows if isinstance(rows, int) else None,
+        "error": error if isinstance(error, str) else None,
+        "download_url": None,
+    }
+    if payload["status"] == "done":
+        payload["download_url"] = (
+            f"/api/v1/b52/exportar-excel/jobs/{job_id}/download"
+        )
+    return payload
+
+
+@router.get("/exportar-excel/jobs/{job_id}/download")
+def descargar_job_exportar_excel(job_id: str) -> FileResponse:
+    """Descarga el Excel generado por un job asíncrono."""
+    _cleanup_old_jobs()
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Job no encontrado")
+        status = job.get("status")
+        file_path_raw = job.get("file_path")
+        filename_raw = job.get("filename")
+
+    if status != "done":
+        raise HTTPException(
+            status_code=409,
+            detail="El archivo aún no está listo",
+        )
+    if not isinstance(file_path_raw, str):
+        raise HTTPException(status_code=500, detail="Ruta de archivo inválida")
+
+    file_path = Path(file_path_raw)
+    if not file_path.exists():
+        raise HTTPException(
+            status_code=410,
+            detail="Archivo expirado o no disponible",
+        )
+
+    filename = (
+        filename_raw
+        if isinstance(filename_raw, str)
+        else f"b52_{date.today().isoformat()}.xlsx"
+    )
+    return FileResponse(
+        path=file_path,
         media_type=(
             "application/vnd.openxmlformats-officedocument"
             ".spreadsheetml.sheet"
         ),
-        headers={"Content-Disposition": (f"attachment; filename={filename}")},
+        filename=filename,
+    )
+
+
+@router.get("/exportar-excel")
+def exportar_excel(_: Session = Depends(get_db)) -> JSONResponse:
+    """Compatibilidad: crea job y devuelve estado (anti-524)."""
+    job_id = _create_export_job()
+    return JSONResponse(
+        status_code=202,
+        content={
+            "message": "Exportación iniciada en segundo plano",
+            "job_id": job_id,
+            "status_url": f"/api/v1/b52/exportar-excel/jobs/{job_id}",
+            "download_url": (
+                "/api/v1/b52/exportar-excel/jobs/" f"{job_id}/download"
+            ),
+        },
     )
