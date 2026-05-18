@@ -76,10 +76,9 @@ def _run_excel_export_job(job_id: str) -> None:
     try:
         df = pd.read_sql(text(_EXPORT_QUERY), engine)
         _EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-        filename = f"b52_{date.today().isoformat()}_{job_id[:8]}.xlsx"
+        filename = f"b52_{date.today().isoformat()}_{job_id[:8]}.csv"
         file_path = _EXPORT_DIR / filename
-        with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False)
+        df.to_csv(file_path, index=False, encoding="utf-8-sig")
 
         with _jobs_lock:
             if job_id in _jobs:
@@ -330,10 +329,7 @@ def descargar_job_exportar_excel(job_id: str) -> FileResponse:
     )
     return FileResponse(
         path=file_path,
-        media_type=(
-            "application/vnd.openxmlformats-officedocument"
-            ".spreadsheetml.sheet"
-        ),
+        media_type="text/csv; charset=utf-8",
         filename=filename,
     )
 
